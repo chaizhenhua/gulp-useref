@@ -1,7 +1,9 @@
 'use strict';
 var gutil = require('gulp-util'),
     through = require('through2'),
-    useref = require('node-useref');
+    useref = require('node-useref'),
+    vfs = require('vinyl-fs'),
+    concat = require('gulp-concat');
 
 module.exports = function () {
     return through.obj(function (file, enc, cb) {
@@ -25,31 +27,42 @@ module.exports = function () {
     });
 };
 
-module.exports.assets = function (options) {
+module.exports.assets = function () {
     var path = require('path'),
-        fs = require('fs'),
         braceExpandJoin = require('brace-expand-join'),
         glob = require('glob'),
-        stripBom = require('strip-bom'),
         isAbsoluteUrl = require('is-absolute-url'),
-        opts = options || {},
-        types = opts.types || ['css', 'js'],
-        restoreStream = through.obj();
+        prepair = [], 
+        opts,
+        types,
+        restoreStream = through.obj(),
+        unprocessed = 0,
+        end = false;
+    Array.prototype.push.apply(prepair, arguments);
+    opts = prepair.shift() || {};
+    types = opts.types || ['css', 'js'];
 
     var assets = through.obj(function (file, enc, cb) {
         var output = useref(file.contents.toString());
         var assets = output[1];
 
+
+        types.forEach(function (type) {
+            var files = assets[type];
+            if (files) {
+                unprocessed += Object.keys(files).length;
+            }
+        });
+
         types.forEach(function (type) {
             var files = assets[type];
             if (files) {
                 Object.keys(files).forEach(function (name) {
-                    var buffer = [];
                     var filepaths = files[name].assets;
 
                     if (filepaths.length) {
                         var searchPaths,
-                            joinedFile;
+                            src = [];
 
                         if (files[name].searchPaths) {
                             searchPaths = braceExpandJoin(file.cwd, files[name].searchPaths);
@@ -66,7 +79,7 @@ module.exports.assets = function (options) {
 
                             searchPaths = braceExpandJoin(file.cwd, searchPaths);
                         }
-
+                        
                         filepaths.forEach(function (filepath) {
                             var pattern,
                                 filenames;
@@ -77,24 +90,26 @@ module.exports.assets = function (options) {
                                 if (!filenames.length) {
                                     filenames.push(pattern);
                                 }
-                                try {
-                                    buffer.push(stripBom(fs.readFileSync(filenames[0])));
-                                } catch (err) {
-                                    this.emit('error', new gutil.PluginError('gulp-useref', err));
-                                }
+                                src.push(filenames[0]);
                             }
                         }, this);
+                        var self = this;
+                        var stream = vfs.src(src);
+                        prepair.forEach(function(plugin) {
+                            stream.pipe(plugin);
+                        });
 
-                        if (buffer.length) {
-                            joinedFile = new gutil.File({
-                                cwd: file.cwd,
-                                base: file.base,
-                                path: path.join(file.base, name),
-                                contents: new Buffer(buffer.join(gutil.linefeed))
-                            });
-
-                            this.push(joinedFile);
-                        }
+                        stream.pipe(concat(name)).pipe(through.obj(function (joinedFile, enc, callback) {
+                            joinedFile.path = path.join(file.base, name);
+                            joinedFile.cwd = file.cwd;
+                            joinedFile.base = file.base;
+                            self.push(joinedFile);
+                            callback(null, joinedFile);
+                        })).on('finish', function() {
+                            if (--unprocessed == 0 && end) {
+                                self.emit('end');
+                            }
+                        });
                     }
 
                 }, this);
@@ -102,6 +117,11 @@ module.exports.assets = function (options) {
         }, this);
 
         restoreStream.write(file, cb);
+    }, function() {
+        end = true;
+        if (unprocessed == 0) {
+            this.emit('end');
+        }
     });
 
     assets.restore = function () {
